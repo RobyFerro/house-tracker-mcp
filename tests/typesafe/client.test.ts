@@ -40,4 +40,48 @@ describe("HttpTypeSafeClient", () => {
     await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(TypeSafeApiError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("retries on a 503 and succeeds on the next attempt", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(503, { error: "unavailable" }))
+      .mockResolvedValueOnce(jsonResponse(200, { model: "jev-1.0", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }));
+    const client = new HttpTypeSafeClient("test-key", fetchMock as unknown as typeof fetch);
+
+    const result = await client.systemOne({ state: {}, questions: {} });
+
+    expect(result.answers).toEqual({});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a network-level failure (fetch rejection) and succeeds on the next attempt", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(jsonResponse(200, { model: "jev-1.0", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }));
+    const client = new HttpTypeSafeClient("test-key", fetchMock as unknown as typeof fetch);
+
+    const result = await client.systemOne({ state: {}, questions: {} });
+
+    expect(result.answers).toEqual({});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws TypeSafeApiError after exhausting retries on repeated network failures", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    const client = new HttpTypeSafeClient("test-key", fetchMock as unknown as typeof fetch);
+
+    await expect(client.systemOne({ state: {}, questions: {} })).rejects.toBeInstanceOf(TypeSafeApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("passes an abort signal so a hung request can time out", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { model: "jev-1.0", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }),
+    );
+    const client = new HttpTypeSafeClient("test-key", fetchMock as unknown as typeof fetch);
+
+    await client.systemOne({ state: {}, questions: {} });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
 });

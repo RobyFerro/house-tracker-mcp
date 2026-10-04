@@ -12,9 +12,10 @@ export interface TypeSafeClient {
 }
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-const RETRYABLE_STATUSES = new Set([429, 529]);
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 const MAX_RETRIES = 2;
 const RETRY_DELAYS_MS = [500, 1500];
+const REQUEST_TIMEOUT_MS = 20_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -27,13 +28,27 @@ export class HttpTypeSafeClient implements TypeSafeClient {
   ) {}
 
   async systemOne(request: SystemOneRequest): Promise<SystemOneResponse> {
-    let lastErrorBody: unknown;
+    let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const response = await this.fetchFn(ENDPOINT, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "jev-latest", ...request }),
-      });
+      let response: Response;
+      try {
+        response = await this.fetchFn(ENDPOINT, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${this.apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "jev-latest", ...request }),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (networkError) {
+        // Network failure or timeout ("TypeSafe non risponde / troppo lento"): retry like a 5xx.
+        if (attempt === MAX_RETRIES) {
+          throw new TypeSafeApiError(
+            `TypeSafe API non raggiungibile: ${String(networkError)}`, 0, networkError,
+          );
+        }
+        lastError = networkError;
+        await delay(RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
 
       if (response.ok) {
         return (await response.json()) as SystemOneResponse;
@@ -43,9 +58,9 @@ export class HttpTypeSafeClient implements TypeSafeClient {
       if (!RETRYABLE_STATUSES.has(response.status) || attempt === MAX_RETRIES) {
         throw new TypeSafeApiError(`TypeSafe API error ${response.status}`, response.status, body);
       }
-      lastErrorBody = body;
+      lastError = body;
       await delay(RETRY_DELAYS_MS[attempt]);
     }
-    throw new TypeSafeApiError("TypeSafe API: retry esauriti", 0, lastErrorBody);
+    throw new TypeSafeApiError("TypeSafe API: retry esauriti", 0, lastError);
   }
 }
