@@ -1,6 +1,6 @@
 import { TypeSafeApiError, type TypeSafeClient } from "./client.js";
 import type { ChoiceQuestion, NoulQuestion } from "./types.js";
-import { CLEAN_ENERGY_CODES, THRESHOLDS } from "../constants.js";
+import { ENERGY_CLASSES, THRESHOLDS } from "../constants.js";
 import type { DuplicateCandidate } from "../db/listingsRepo.js";
 
 export interface JudgmentInput {
@@ -9,6 +9,7 @@ export interface JudgmentInput {
   price: number;
   mq: number;
   locali: number;
+  zona: string | null;
   energyText: string | null;
   needsEnergyJudgment: boolean;
   duplicateCandidates: DuplicateCandidate[];
@@ -50,18 +51,22 @@ export async function runListingJudgments(
   if (input.needsEnergyJudgment && input.energyText) {
     questions.energy_class = {
       type: "choice",
-      instructions: "Quale classe energetica viene affermata nel testo per questo immobile?",
+      instructions:
+        "Quale classe energetica viene affermata nel testo per questo immobile? Se il testo dice che l'APE è in fase di richiesta/attesa usa in_attesa; se non è affermata alcuna classe usa nd.",
       criteria: Object.fromEntries(
-        CLEAN_ENERGY_CODES.map((code) => [code, `Il testo indica la classe energetica ${code}`]),
+        ENERGY_CLASSES.map((code) => [code, `Il testo indica la classe energetica ${code}`]),
       ),
     };
   }
 
   input.duplicateCandidates.forEach((candidate, index) => {
+    const zonaCandidato = candidate.zona ? `, ${candidate.zona}` : "";
     questions[`duplicate_${index}`] = {
       type: "noul",
       instructions:
-        "I due annunci descrivono lo stesso immobile reale (stesso indirizzo/caratteristiche), anche se pubblicati su portali o da inserzionisti diversi?",
+        `Il nuovo annuncio descrive lo stesso immobile reale del candidato "${candidate.id}" `
+        + `(${candidate.title}, ${candidate.comune}${zonaCandidato})? Confronta indirizzo/zona, prezzo e mq, `
+        + `anche se pubblicati su portali o da inserzionisti diversi.`,
       criteria: {
         true: "Stesso immobile, probabilmente lo stesso annuncio ripubblicato",
         false: "Immobili diversi",
@@ -75,8 +80,9 @@ export async function runListingJudgments(
     prezzo: input.price,
     mq: input.mq,
     locali: input.locali,
+    zona_nuovo_annuncio: input.zona,
     candidati_duplicato: input.duplicateCandidates.map((c) => ({
-      id: c.id, titolo: c.title, dettagli: c.details, prezzo: c.price, mq: c.mq,
+      id: c.id, titolo: c.title, zona: c.zona, url: c.url, dettagli: c.details, prezzo: c.price, mq: c.mq,
     })),
   };
 

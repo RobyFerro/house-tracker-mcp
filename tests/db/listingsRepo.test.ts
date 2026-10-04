@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../../src/db/client.js";
 import {
   addOtherLink, beginDailyRun, findDuplicateCandidates, getListingById, getTrackingState,
-  insertNewListing, markRemoved, promoteToMain, setRating, touchLastChecked, updateListingOnRecheck,
-  type NewListingInput,
+  insertNewListing, markRemoved, promoteToMain, setRating, touchLastChecked, touchRecheck,
+  updateListingOnRecheck, type NewListingInput,
 } from "../../src/db/listingsRepo.js";
 
 let db: Database.Database;
@@ -59,13 +59,14 @@ describe("listingsRepo", () => {
     expect(row?.removed_at).toBe("2026-10-07");
   });
 
-  it("setRating never changes price or status", () => {
+  it("setRating never changes price or status, and reports whether the listing existed", () => {
     insertNewListing(db, sampleInput, "2026-10-04");
-    setRating(db, "imm:1", "interessante");
+    expect(setRating(db, "imm:1", "interessante")).toBe(true);
     const row = getListingById(db, "imm:1");
     expect(row?.rating).toBe("interessante");
     expect(row?.price).toBe(200000);
     expect(row?.status).toBe("nuovo");
+    expect(setRating(db, "imm:999", "interessante")).toBe(false);
   });
 
   it("beginDailyRun flips nuovo/ribassato/aumentato to già_visto but leaves rimosso alone", () => {
@@ -87,6 +88,14 @@ describe("listingsRepo", () => {
     expect(noMatch).toHaveLength(0);
   });
 
+  it("findDuplicateCandidates caps the result to the 5 closest matches", () => {
+    for (let i = 0; i < 8; i++) {
+      insertNewListing(db, { ...sampleInput, id: `imm:${i}`, mq: 110 + i }, "2026-10-04");
+    }
+    const result = findDuplicateCandidates(db, "Bergamo", 200000, 110);
+    expect(result.length).toBeLessThanOrEqual(5);
+  });
+
   it("addOtherLink appends without duplicating the same url", () => {
     insertNewListing(db, sampleInput, "2026-10-04");
     addOtherLink(db, "imm:1", { portal: "Subito.it", url: "https://example.test/sub" });
@@ -103,6 +112,55 @@ describe("listingsRepo", () => {
     const main = getListingById(db, "sub:9");
     expect(main?.seller).toBe("privato");
     expect(JSON.parse(main!.other_links)).toEqual([{ portal: "Immobiliare.it", url: "https://example.test/1" }]);
+  });
+
+  it("promoteToMain preserves the demoted listing's rating, found_at and price history", () => {
+    insertNewListing(db, sampleInput, "2026-10-01");
+    setRating(db, "imm:1", "visita_fissata");
+    updateListingOnRecheck(db, {
+      id: "imm:1", newPrice: 190000, status: "ribassato", previousPrice: 200000, dataWarning: false,
+    }, "2026-10-03");
+    const demoted = getListingById(db, "imm:1")!;
+    promoteToMain(
+      db,
+      { ...sampleInput, id: "sub:9", seller: "privato", url: "https://example.test/9", price: 190000 },
+      demoted,
+      "2026-10-05",
+    );
+    const main = getListingById(db, "sub:9")!;
+    expect(main.rating).toBe("visita_fissata");
+    expect(main.found_at).toBe("2026-10-01");
+    const history = db.prepare("SELECT date, price FROM price_history WHERE listing_id = ? ORDER BY id").all("sub:9");
+    expect(history).toEqual([
+      { date: "2026-10-01", price: 200000 },
+      { date: "2026-10-03", price: 190000 },
+      { date: "2026-10-05", price: 190000 },
+    ]);
+  });
+
+  it("promoteToMain does not throw when the new id collides with an existing row (rolled back by the caller's transaction)", () => {
+    insertNewListing(db, sampleInput, "2026-10-01");
+    insertNewListing(db, { ...sampleInput, id: "sub:9", url: "https://example.test/9" }, "2026-10-01");
+    const demoted = getListingById(db, "imm:1")!;
+    expect(() =>
+      promoteToMain(db, { ...sampleInput, id: "sub:9", seller: "privato", url: "https://example.test/9" }, demoted, "2026-10-05"),
+    ).toThrow();
+    // The point of this test is just to document/reproduce the PK collision;
+    // callers are expected to wrap promoteToMain in a transaction (see upsertListing.ts).
+  });
+
+  it("touchRecheck sets the given status and clears removed_at without touching previous_price", () => {
+    insertNewListing(db, sampleInput, "2026-10-01");
+    updateListingOnRecheck(db, {
+      id: "imm:1", newPrice: 190000, status: "ribassato", previousPrice: 200000, dataWarning: false,
+    }, "2026-10-02");
+    markRemoved(db, "imm:1", "2026-10-03");
+    touchRecheck(db, "imm:1", "2026-10-04", "ribassato");
+    const row = getListingById(db, "imm:1");
+    expect(row?.status).toBe("ribassato");
+    expect(row?.previous_price).toBe(200000);
+    expect(row?.removed_at).toBeNull();
+    expect(row?.last_checked).toBe("2026-10-04");
   });
 
   it("getTrackingState excludes rimosso listings", () => {

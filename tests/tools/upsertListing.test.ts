@@ -122,4 +122,49 @@ describe("upsertListing", () => {
     const main = getListingById(db, "imm:9");
     expect(JSON.parse(main!.other_links)).toEqual([{ portal: "Casa.it", url: "https://example.test/7" }]);
   });
+
+  it("updates its own price even when another tracked listing would otherwise match as a duplicate candidate", async () => {
+    insertNewListing(db, legacyNewListing, "2026-10-01");
+    insertNewListing(db, { ...legacyNewListing, id: "imm:10", url: "https://example.test/10" }, "2026-10-01");
+    const result = await upsertListing(db, duplicateClient, { ...baseInput, id: "imm:9", price: 190000 }, "2026-10-04");
+    expect(result.status).toBe("ribassato");
+    expect(getListingById(db, "imm:9")?.price).toBe(190000);
+    expect(getListingById(db, "imm:10")?.price).toBe(200000);
+    expect(JSON.parse(getListingById(db, "imm:10")!.other_links)).toEqual([]);
+  });
+
+  it("keeps ribassato status and previous_price when the same listing is upserted twice in one run with its already-recorded price", async () => {
+    insertNewListing(db, legacyNewListing, "2026-10-01");
+    db.prepare("UPDATE listings SET status = 'già_visto' WHERE id = 'imm:9'").run();
+    const first = await upsertListing(db, goodJudgmentClient, { ...baseInput, id: "imm:9", price: 190000 }, "2026-10-04");
+    expect(first.status).toBe("ribassato");
+    const second = await upsertListing(db, goodJudgmentClient, { ...baseInput, id: "imm:9", price: 190000 }, "2026-10-04");
+    expect(second.status).toBe("ribassato");
+    const row = getListingById(db, "imm:9");
+    expect(row?.status).toBe("ribassato");
+    expect(row?.previous_price).toBe(200000);
+  });
+
+  it("surfaces the TypeSafe error message when judgments could not run", async () => {
+    const client: TypeSafeClient = { systemOne: async () => { throw new TypeSafeApiError("down", 0, null); } };
+    const result = await upsertListing(db, client, baseInput, "2026-10-04");
+    expect(result.judgmentError).toContain("down");
+  });
+
+  it("rejects a listing whose energy class resolved from free text is below B", async () => {
+    const client: TypeSafeClient = {
+      systemOne: async () => ({
+        model: "jev", usage: { input_tokens: 1, output_tokens: 1 },
+        answers: {
+          box_included: { type: "noul", noul: 0.95 },
+          data_coherence: { type: "noul", noul: 0.9 },
+          energy_class: { type: "choice", choice: "G", confidence: 0.8, probabilities: { G: 0.8 } },
+        },
+      }),
+    };
+    const input: UpsertListingInput = { ...baseInput, energyClassCode: null, energyText: "classe energetica G" };
+    const result = await upsertListing(db, client, input, "2026-10-04");
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toMatch(/energetica/);
+  });
 });

@@ -97,14 +97,22 @@ export function touchLastChecked(db: Database.Database, id: string, today: strin
   db.prepare("UPDATE listings SET last_checked = ? WHERE id = ?").run(today, id);
 }
 
+export function touchRecheck(db: Database.Database, id: string, today: string, status: ListingStatus): void {
+  db.prepare(`
+    UPDATE listings SET status = ?, removed_at = NULL, last_checked = ?, updated_at = ?
+    WHERE id = ?
+  `).run(status, today, today, id);
+}
+
 export function markRemoved(db: Database.Database, id: string, today: string): ListingRow | undefined {
   db.prepare("UPDATE listings SET status = 'rimosso', removed_at = ? WHERE id = ?").run(today, id);
   return getListingById(db, id);
 }
 
-export function setRating(db: Database.Database, id: string, rating: string): void {
+export function setRating(db: Database.Database, id: string, rating: string): boolean {
   const today = new Date().toISOString().slice(0, 10);
-  db.prepare("UPDATE listings SET rating = ?, updated_at = ? WHERE id = ?").run(rating, today, id);
+  const result = db.prepare("UPDATE listings SET rating = ?, updated_at = ? WHERE id = ?").run(rating, today, id);
+  return result.changes > 0;
 }
 
 export function beginDailyRun(db: Database.Database): void {
@@ -127,11 +135,17 @@ export function addOtherLink(db: Database.Database, id: string, link: { portal: 
 export function promoteToMain(
   db: Database.Database, newMain: NewListingInput, demoted: ListingRow, today: string,
 ): void {
+  // The demoted row is the same real property under a different (agenzia) listing:
+  // insert the new row first, re-parent its price history and carry over rating/found_at,
+  // then delete the demoted row last so nothing references it when it goes away.
   const links = JSON.parse(demoted.other_links) as Array<{ portal: string; url: string }>;
   links.push({ portal: demoted.portal, url: demoted.url });
-  db.prepare("DELETE FROM listings WHERE id = ?").run(demoted.id);
+
   insertNewListing(db, newMain, today);
-  db.prepare("UPDATE listings SET other_links = ? WHERE id = ?").run(JSON.stringify(links), newMain.id);
+  db.prepare("UPDATE price_history SET listing_id = ? WHERE listing_id = ?").run(newMain.id, demoted.id);
+  db.prepare("UPDATE listings SET other_links = ?, rating = ?, found_at = ? WHERE id = ?")
+    .run(JSON.stringify(links), demoted.rating, demoted.found_at, newMain.id);
+  db.prepare("DELETE FROM listings WHERE id = ?").run(demoted.id);
 }
 
 export interface TrackingStateRow {
@@ -145,9 +159,11 @@ export function getTrackingState(db: Database.Database): TrackingStateRow[] {
 }
 
 export interface DuplicateCandidate {
-  id: string; comune: string; price: number; mq: number; portal: string; url: string;
+  id: string; comune: string; zona: string | null; price: number; mq: number; portal: string; url: string;
   title: string; details: string | null; seller: Seller; status: ListingStatus; other_links: string;
 }
+
+const MAX_DUPLICATE_CANDIDATES = 5;
 
 export function findDuplicateCandidates(
   db: Database.Database, comune: string, price: number, mq: number,
@@ -155,9 +171,11 @@ export function findDuplicateCandidates(
   const priceLow = price * 0.98;
   const priceHigh = price * 1.02;
   return db.prepare(`
-    SELECT id, comune, price, mq, portal, url, title, details, seller, status, other_links
+    SELECT id, comune, zona, price, mq, portal, url, title, details, seller, status, other_links
     FROM listings
     WHERE comune = ? AND status != 'rimosso'
       AND (price BETWEEN ? AND ? OR mq BETWEEN ? AND ?)
-  `).all(comune, priceLow, priceHigh, mq - 3, mq + 3) as DuplicateCandidate[];
+    ORDER BY ABS(price - ?) + ABS(mq - ?) * 1000 ASC
+    LIMIT ${MAX_DUPLICATE_CANDIDATES}
+  `).all(comune, priceLow, priceHigh, mq - 3, mq + 3, price, mq) as DuplicateCandidate[];
 }
