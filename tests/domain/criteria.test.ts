@@ -49,9 +49,18 @@ describe("isComuneAmmesso", () => {
 });
 
 describe("detectSeller", () => {
-  it("detects privato from explicit text", () => {
+  it("detects privato from the strong, unambiguous phrases anywhere in the text", () => {
     expect(detectSeller("Vendita da privato, no agenzie")).toBe("privato");
-    expect(detectSeller(null, "Appartamento Privato in vendita")).toBe("privato");
+    expect(detectSeller(null, "Appartamento in vendita, no agenzie per favore")).toBe("privato");
+  });
+
+  it("detects privato from a bare 'privato' only in the dedicated seller-text field (the first argument)", () => {
+    expect(detectSeller("Privato", "Trilocale con giardino")).toBe("privato");
+  });
+
+  it("does not treat a bare 'privato' inside the general description as a seller declaration", () => {
+    // "giardino privato", "posto auto privato", etc. are common agency copy, not a seller marker.
+    expect(detectSeller(null, "Appartamento con giardino privato e ingresso privato")).toBe("agenzia");
   });
 
   it("defaults to agenzia when nothing explicit is said", () => {

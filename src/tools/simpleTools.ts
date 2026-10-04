@@ -28,7 +28,10 @@ export function handleMarkRemoved(db: Database.Database, id: string): ToolResult
 }
 
 export function handleSetRating(db: Database.Database, id: string, rating: string): ToolResult {
-  repoSetRating(db, id, rating);
+  const existed = repoSetRating(db, id, rating);
+  if (!existed) {
+    return { content: [{ type: "text", text: `Annuncio non trovato: ${id}` }], isError: true };
+  }
   return jsonResult({ id, rating });
 }
 

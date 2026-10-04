@@ -41,9 +41,12 @@ describe("simple tool handlers", () => {
     expect(missing.isError).toBe(true);
   });
 
-  it("handleSetRating sets the rating field", () => {
+  it("handleSetRating sets the rating field and errors on an unknown id", () => {
     const result = handleSetRating(db, "imm:1", "interessante");
     expect(JSON.parse(result.content[0].text)).toEqual({ id: "imm:1", rating: "interessante" });
+
+    const missing = handleSetRating(db, "imm:999", "interessante");
+    expect(missing.isError).toBe(true);
   });
 
   it("handleGetDailySummary returns a DailySummary JSON body", () => {

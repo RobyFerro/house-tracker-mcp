@@ -45,9 +45,18 @@ export function checkDeterministicCriteria(input: CriteriaCheckInput): CriteriaC
   return { passed: true };
 }
 
-const SELLER_PRIVATO_PATTERN = /\b(privato|da privato|no agenzie)\b/i;
+// "da privato" and "no agenzie" are unambiguous seller declarations wherever they
+// appear. A bare "privato" is also a reliable marker when it comes from the page's
+// dedicated seller-type text (the first argument) — e.g. a "Privato" badge — but
+// not when it only occurs inside the general property description, where phrases
+// like "giardino privato" or "ingresso privato" are ordinary agency copy.
+const STRONG_PRIVATO_PATTERN = /\b(da privato|no agenzie)\b/i;
+const BADGE_PRIVATO_PATTERN = /\bprivato\b/i;
 
 export function detectSeller(...texts: Array<string | null | undefined>): Seller {
+  const [sellerText] = texts;
   const joined = texts.filter((t): t is string => Boolean(t)).join(" \n ");
-  return SELLER_PRIVATO_PATTERN.test(joined) ? "privato" : "agenzia";
+  if (STRONG_PRIVATO_PATTERN.test(joined)) return "privato";
+  if (sellerText && BADGE_PRIVATO_PATTERN.test(sellerText)) return "privato";
+  return "agenzia";
 }
